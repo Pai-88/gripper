@@ -1,0 +1,25 @@
+# logs & run artefacts
+logs/
+*.jsonl
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# models (download / train separately; don't commit weights)
+models/
+*.onnx
+*.hef
+*.pt
+*.tflite
+
+# machine-generated calibration (keep robot.yaml, not the per-bench capture)
+config/calibration.yaml
+
+# os
+.DS_Store

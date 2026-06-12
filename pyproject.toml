@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gripper"
+version = "0.1.0"
+description = "Dual-mode (teleop + autonomous) 4-DOF robotic gripper control stack for RPi5 + ESP32"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "MIT" }
+
+# Runtime deps. The pure-logic core (protocol, kinematics, limits, state
+# machine, gestures, teleop_map) needs NONE of these — only the vision/comms/
+# dashboard layers do — so the unit suite runs on a bare interpreter.
+dependencies = [
+  "pyyaml>=6.0",
+  "pydantic>=2.0",
+  "numpy>=1.24",
+  "opencv-python>=4.9",
+  "mediapipe>=0.10.9",
+  "pyserial>=3.5",
+  "pyserial-asyncio>=0.6",
+  "structlog>=24.1",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+# Heavier / accelerator-specific extras, installed per build phase.
+autograsp = ["ultralytics>=8.2", "onnxruntime>=1.17"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+gripper = "gripper.main:main"
+
+[tool.setuptools.packages.find]
+include = ["gripper*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
