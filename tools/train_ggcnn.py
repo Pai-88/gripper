@@ -1,41 +1,42 @@
 #!/usr/bin/env python3
 """Train GG-CNN for Mode 2 grasp detection and export it to ONNX.
 
-The exported model produces four out_size x out_size maps in the order
-[quality, cos2θ, sin2θ, width] — exactly what gripper/vision/grasp_vision.py's
-``GGCNNGraspDetector`` + ``decode_ggcnn`` consume (ONNX Runtime, no torch on the
-Pi). The label encoding in ``draw_grasp_target`` is the inverse of that decode
-and is pure + unit-tested; the model / dataset / training / export are
+Two-step pipeline (keeps slow raw-dataset parsing out of the train loop):
+
+    1. python3 tools/prepare_dataset.py --dataset cornell --data <raw> --out data/prep
+    2. python3 tools/train_ggcnn.py    --data data/prep --epochs 40 \
+           --export-onnx models/ggcnn.onnx
+
+``prepare_dataset.py`` renders Cornell/Jacquard into cached ``.npz`` shards
+(``input`` CxHxW + ``target`` 4xHxW); this script just reads them. The exported
+model emits four out_size x out_size maps in the order [quality, cos2θ, sin2θ,
+width] — exactly what gripper/vision/grasp_vision.py's GGCNNGraspDetector +
+decode_ggcnn consume (ONNX Runtime, no torch on the Pi).
+
+The label encoder ``draw_grasp_target`` (used by the prepare step) is the inverse
+of decode_ggcnn and is pure + unit-tested. The model / training / export are
 torch-gated and lazy-imported, so this file imports without torch installed.
-
-    # Cornell dataset laid out as <root>/**/pcd*r.png + pcd*cpos.txt
-    python3 tools/train_ggcnn.py --data ~/datasets/cornell --epochs 40 \
-        --out models/ggcnn.pt --export-onnx models/ggcnn.onnx
-
-Heavy work needs torch + a dataset + a GPU; this runs at your desk, not on the
-Pi. See build guide §5 ("Learned planar grasp detection").
+Heavy work needs torch + a GPU; it runs at your desk, not on the Pi.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import math
 import os
 import pathlib
 import sys
-from typing import List, Sequence, Tuple
+from typing import Sequence, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-from gripper.vision.grasp_vision import _center_crop_box  # noqa: E402
 
 Grasp = Tuple[float, float, float, float]  # (cx, cy, theta_deg, width_px) in map space
 
 
 # ---------------------------------------------------------------------------
-# Pure label encoding — the inverse of decode_ggcnn (unit-tested, numpy only)
+# Pure label encoding — the inverse of decode_ggcnn (unit-tested, numpy only).
+# Shared with tools/prepare_dataset.py, which renders the dataset target maps.
 # ---------------------------------------------------------------------------
 
 def draw_grasp_target(out_size: int, grasps: Sequence[Grasp],
@@ -65,43 +66,8 @@ def draw_grasp_target(out_size: int, grasps: Sequence[Grasp],
     return q, cos2, sin2, width
 
 
-def _parse_cornell_rects(cpos_path: str) -> List[Tuple[List[float], List[float]]]:
-    """Parse a Cornell ``pcd*cpos.txt`` into a list of (xs, ys) 4-corner rects.
-    Rectangles containing NaN (Cornell's invalid marker) are skipped."""
-    nums = []
-    with open(cpos_path) as fh:
-        for line in fh:
-            parts = line.split()
-            if len(parts) != 2:
-                continue
-            nums.append((float(parts[0]), float(parts[1])))
-    rects = []
-    for i in range(0, len(nums) - 3, 4):
-        corners = nums[i:i + 4]
-        xs = [c[0] for c in corners]
-        ys = [c[1] for c in corners]
-        if any(math.isnan(v) for v in xs + ys):
-            continue
-        rects.append((xs, ys))
-    return rects
-
-
-def _rect_to_grasp(xs: Sequence[float], ys: Sequence[float]) -> Grasp:
-    """Cornell 4-corner rectangle -> (cx, cy, theta_deg, width_px).
-
-    Convention (verify against your labels): corners are ordered around the
-    rectangle; the p0->p1 edge is the gripper-plate direction (grasp angle), and
-    the p1->p2 edge is the jaw opening (width).
-    """
-    cx = sum(xs) / 4.0
-    cy = sum(ys) / 4.0
-    theta = math.degrees(math.atan2(ys[1] - ys[0], xs[1] - xs[0]))
-    width = math.hypot(xs[2] - xs[1], ys[2] - ys[1])
-    return cx, cy, theta, width
-
-
 # ---------------------------------------------------------------------------
-# torch-gated: dataset, model, train loop, ONNX export (lazy imports)
+# torch-gated: dataset reader, model, train loop, ONNX export (lazy imports)
 # ---------------------------------------------------------------------------
 
 def _require_torch():
@@ -113,53 +79,32 @@ def _require_torch():
             "pip install torch torchvision  (the Pi only runs the exported .onnx)")
 
 
-def build_dataset(root: str, out_size: int, use_depth: bool):
-    import cv2
+def build_dataset(root: str):
+    """Read the prepared ``.npz`` shards listed in ``<root>/manifest.txt``."""
     import numpy as np
     from torch.utils.data import Dataset
 
-    class CornellDataset(Dataset):
-        """RGB Cornell grasps rendered into GG-CNN target maps. Centre-crops the
-        640x480 image with the same box the detector uses, then resizes to
-        out_size and transforms the grasp corners to match."""
+    manifest = os.path.join(root, "manifest.txt")
+    if not os.path.exists(manifest):
+        raise SystemExit(
+            f"no manifest.txt in {root} — run tools/prepare_dataset.py first, e.g. "
+            f"python3 tools/prepare_dataset.py --dataset cornell --data <raw> --out {root}")
+    with open(manifest) as fh:
+        names = [ln.strip() for ln in fh if ln.strip()]
 
+    class PreparedDataset(Dataset):
         def __init__(self):
-            self.rgb = sorted(glob.glob(os.path.join(root, "**", "pcd*r.png"),
-                                        recursive=True))
-            if not self.rgb:
-                raise SystemExit(
-                    f"no Cornell 'pcd*r.png' under {root} — point --data at the "
-                    "extracted dataset")
+            self.files = [os.path.join(root, n) for n in names]
+            self.channels = int(np.load(self.files[0])["input"].shape[0])
 
         def __len__(self):
-            return len(self.rgb)
+            return len(self.files)
 
         def __getitem__(self, i):
-            rgb_path = self.rgb[i]
-            cpos = rgb_path.replace("r.png", "cpos.txt")
-            img = cv2.imread(rgb_path)
-            h, w = img.shape[:2]
-            x0, y0, side = _center_crop_box(w, h, out_size)
-            scale = out_size / side
-            crop = cv2.resize(img[y0:y0 + side, x0:x0 + side], (out_size, out_size))
+            d = np.load(self.files[i])
+            return d["input"].astype(np.float32), d["target"].astype(np.float32)
 
-            grasps = []
-            for xs, ys in _parse_cornell_rects(cpos):
-                xs = [(x - x0) * scale for x in xs]
-                ys = [(y - y0) * scale for y in ys]
-                cx, cy, th, wd = _rect_to_grasp(xs, ys)
-                grasps.append((cx, cy, th, wd * scale))
-            q, c, s, wmap = draw_grasp_target(out_size, grasps)
-
-            if use_depth:
-                inp = np.zeros((1, out_size, out_size), np.float32)  # placeholder depth
-            else:
-                rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-                inp = (rgb - 0.5).transpose(2, 0, 1)
-            target = np.stack([q, c, s, wmap], 0)
-            return inp.astype(np.float32), target.astype(np.float32)
-
-    return CornellDataset()
+    return PreparedDataset()
 
 
 def build_model(input_channels: int):
@@ -202,11 +147,12 @@ def train(args) -> None:
     from torch.utils.data import DataLoader
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    channels = 1 if args.depth else 3
-    ds = build_dataset(args.data, args.out_size, args.depth)
+    ds = build_dataset(args.data)
+    channels = ds.channels
     dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers)
     model = build_model(channels).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    print(f"{len(ds)} samples, {channels}-channel input, device={device}")
 
     for epoch in range(args.epochs):
         model.train()
@@ -248,7 +194,7 @@ def export_onnx(model, channels: int, out_size: int, path: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", required=True, help="Cornell dataset root")
+    ap.add_argument("--data", required=True, help="prepared dataset dir (manifest.txt)")
     ap.add_argument("--out", default="models/ggcnn.pt", help="weights output")
     ap.add_argument("--export-onnx", default="models/ggcnn.onnx",
                     help="also export ONNX here ('' to skip)")
@@ -257,9 +203,7 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--out-size", type=int, default=300,
-                    help="square map side (must be divisible by 12)")
-    ap.add_argument("--depth", action="store_true",
-                    help="train the 1-channel depth model instead of RGB")
+                    help="square map side for ONNX export (must match prepare)")
     args = ap.parse_args()
     if args.out_size % 12:
         ap.error("--out-size must be divisible by 12 (e.g. 300)")
