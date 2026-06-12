@@ -49,7 +49,9 @@ class GraspParams:
     commit_frames: int = 5
     # open-loop grasp moves (ticks at the control rate)
     plunge_deg: float = 12.0
-    plunge_ticks: int = 10
+    plunge_ticks: int = 10       # plunge duration cap (always enforced)
+    plunge_fire_mm: Optional[float] = None  # if set + obs has range_mm (VL53L5CX),
+    #                            end the plunge early when the centre is this close
     close_ticks: int = 8
     lift_deg: float = 20.0
     lift_ticks: int = 12
@@ -126,7 +128,12 @@ class GraspSequencer:
             frac = self._counter / p.plunge_ticks
             target = JointTargets(**{**current.__dict__,
                                      "shoulder": self._anchor + p.plunge_deg * frac})
-            if self._counter >= p.plunge_ticks:
+            # ToF gate (if configured) ends the plunge precisely; the tick count
+            # is always the hard cap so a missing/blind ToF can't stall the plunge.
+            tof_fired = (p.plunge_fire_mm is not None and obs is not None
+                         and obs.get("range_mm") is not None
+                         and obs["range_mm"] <= p.plunge_fire_mm)
+            if tof_fired or self._counter >= p.plunge_ticks:
                 self.phase = GraspPhase.CLOSE
                 self._counter = 0
             return target

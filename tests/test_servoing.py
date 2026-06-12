@@ -90,6 +90,30 @@ def test_lost_detection_holds_and_resets_commit():
     assert seq.phase is GraspPhase.PLUNGE
 
 
+def test_tof_gated_plunge_fires_early():
+    p = GraspParams(commit_frames=2, plunge_ticks=50, plunge_fire_mm=80.0)
+    seq = GraspSequencer(p)
+    cur = _home()
+    centred = {"u_norm": 0.0, "area_frac": p.target_area_frac, "theta_deg": 0.0}
+    seq.update(centred, cur)
+    seq.update(centred, cur)
+    assert seq.phase is GraspPhase.PLUNGE
+    seq.update({"range_mm": 200.0}, cur)        # still far -> keep plunging
+    assert seq.phase is GraspPhase.PLUNGE
+    seq.update({"range_mm": 50.0}, cur)         # within fire_mm -> CLOSE early (tick 2 << 50)
+    assert seq.phase is GraspPhase.CLOSE
+
+
+def test_plunge_ignores_range_when_gate_disabled():
+    p = GraspParams(commit_frames=1, plunge_ticks=5)   # plunge_fire_mm is None
+    seq = GraspSequencer(p)
+    cur = _home()
+    seq.update({"u_norm": 0.0, "area_frac": p.target_area_frac, "theta_deg": 0.0}, cur)
+    assert seq.phase is GraspPhase.PLUNGE
+    seq.update({"range_mm": 1.0}, cur)          # very close, but gate off -> ticks only
+    assert seq.phase is GraspPhase.PLUNGE
+
+
 def test_closed_loop_converges_and_completes():
     """Toy plant: each commanded joint delta nudges the image error toward 0."""
     p = GraspParams(commit_frames=3)
