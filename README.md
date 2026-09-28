@@ -55,9 +55,9 @@ tests/                 unit tests
 ## Running it
 
 ```bash
-python3 run_tests.py                       # unit tests, no third-party dependencies
-python3 tools/gen_firmware_limits.py       # regenerate the ESP32 limits header from robot.yaml
-python3 -m gripper.main --dry-run          # full state machine, no cameras or servos
+python3 run_tests.py                   # unit tests, no dependencies
+python3 tools/gen_firmware_limits.py   # ESP32 limits header from robot.yaml
+python3 -m gripper.main --dry-run      # state machine, no cameras or servos
 ```
 
 On the Pi, with the full dependencies:
