@@ -14,32 +14,42 @@ The software is written and unit-tested (100 tests, `python3 run_tests.py`), and
 ## Architecture
 
 ```
-hand   -> USB webcam  --+                         +-- Pi 5: perception and planning (this package)
-object -> wrist camera -+-> Raspberry Pi 5 -------+     MediaPipe hands, YOLO / GG-CNN grasp, IBVS,
-                          |  USB-CDC, 1 Mbaud       |     state machine, controller, watchdog
-                          |  CRC-framed messages    |
-                          v                         +-- ESP32: hard real-time (firmware/)
-                        ESP32 --> 6 LX bus servos       200 Hz slew limit, soft joint limits,
-                          ^       (4 DOF + grip)        200 ms command watchdog, e-stop FET
-                separate 7.4 V servo rail (never powered from the Pi)
+hand   -> USB webcam   --+
+object -> wrist camera --+--> Raspberry Pi 5  (this package)
+                                MediaPipe hands, YOLO / GG-CNN grasp,
+                                IBVS, state machine, controller, watchdog
+                                     |
+                                     |  USB-CDC 1 Mbaud, CRC-framed messages
+                                     v
+                              ESP32  (firmware/)
+                                200 Hz slew limit, soft joint limits,
+                                200 ms command watchdog, e-stop MOSFET
+                                     |
+                                     v
+                              6 LX bus servos (4 DOF + grip)
+                              on a separate 7.4 V rail, never powered
+                              from the Pi
 ```
 
 ## Layout
 
 ```
-gripper/            Python package (Pi side)
-  protocol.py         serial wire format + CRC-8/MAXIM, the single source of truth
-  kinematics.py       closed-form 2-link IK / FK
-  state_machine.py    IDLE, TELEOP, ARM_AUTO, AUTO_GRASP, RETURN, ESTOP
-  control/            joint limits, teleop mapping (One-Euro filter), controller
-  vision/             gesture recognition, hand tracking, grasp detection (blob, YOLO11n, GG-CNN)
-  comms/              async serial link to the ESP32
-  safety/             Pi-side watchdog
-  telemetry/          JSONL logger + FastAPI dashboard
-firmware/esp32_servo/ ESP32 firmware; protocol.h mirrors protocol.py, limits.h is generated
-config/               robot.yaml (edit this), calibration.yaml (generated)
-tools/                firmware limit generator, calibration, replay, dataset preparation, training
-tests/                unit tests
+gripper/               Python package (Pi side)
+  protocol.py          serial wire format + CRC-8/MAXIM (source of truth)
+  kinematics.py        closed-form 2-link IK / FK
+  state_machine.py     IDLE, TELEOP, ARM_AUTO, AUTO_GRASP, RETURN, ESTOP
+  control/             joint limits, teleop mapping (One-Euro), controller
+  vision/              gestures, hand tracking, grasp detection
+                       (blob, YOLO11n, GG-CNN)
+  comms/               async serial link to the ESP32
+  safety/              Pi-side watchdog
+  telemetry/           JSONL logger + FastAPI dashboard
+firmware/esp32_servo/  ESP32 firmware; protocol.h mirrors protocol.py,
+                       limits.h is generated
+config/                robot.yaml (edit this), calibration.yaml (generated)
+tools/                 limit generator, calibration, replay, dataset prep,
+                       training
+tests/                 unit tests
 ```
 
 ## Running it
